@@ -414,6 +414,17 @@ impl<E: Pairing> FinalAggState<E> {
             &self.public_inputs,
         )
     }
+
+    /// Returns a reference to the public inputs for verification
+    pub fn get_public_inputs(&self) -> &[E::ScalarField] {
+        &self.public_inputs
+    }
+
+    /// Returns a reference to the super commitment
+    pub fn get_super_com(&self) -> &IppCom<E> {
+        &self.super_com
+    }
+
 }
 
 impl<C, E, P> CoordinatorStage1State<C, E, P>

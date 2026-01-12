@@ -62,3 +62,11 @@ required-features = ["asm", "parallel"]
 name = "monolithic"
 harness = false
 required-features = ["asm", "parallel"]
+
+[[bench]]
+name = "sha256_bench"
+harness = false
+
+[[bin]]
+name = "sha256_benchmark"
+path = "src/bin/sha256_benchmark.rs"

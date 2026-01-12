@@ -16,6 +16,12 @@ pub mod tree_hash_circuit;
 pub mod util;
 pub mod worker;
 
+// 在 lib.rs 的模块声明部分添加: 
+pub mod sha256_bench_circuit;
+
+// 在 pub use 部分添加: 
+pub use sha256_bench_circuit::{Sha256BenchCircuit, Sha256BenchCircuitParams};
+
 use crate::portal_manager::SetupRamPortalManager;
 use portal_manager::{PortalManager, ProverPortalManager};
 
