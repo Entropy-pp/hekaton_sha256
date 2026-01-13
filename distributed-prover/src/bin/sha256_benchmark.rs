@@ -1,9 +1,9 @@
 //! SHA256 Circuit Benchmark for Hekaton System
-//!   
+//!
 //! This binary measures and outputs performance metrics including:
-//!  - Setup time (proving key generation)
-//! - Commitment time (stage 0)
-//! - Proving time (stage 1)
+//! - Setup time (proving key generation)
+//! - Per-worker commitment time (stage 0)
+//! - Per-worker proving time (stage 1)
 //! - Aggregation time
 //!  - Verification time
 //!  - Constraint counts
@@ -31,6 +31,14 @@ use distributed_prover::{
     CircuitWithPortals,
 };
 
+/// Per-worker timing information
+#[derive(Debug, Clone)]
+struct WorkerTiming {
+    worker_id: usize,
+    stage0_time_ms: f64,
+    stage1_time_ms: f64,
+}
+
 /// Benchmark results for a single run
 #[derive(Debug, Clone)]
 struct BenchmarkResult {
@@ -38,44 +46,103 @@ struct BenchmarkResult {
     num_constraints_per_subcircuit: usize,
     total_constraints: usize,
     setup_time_ms: f64,
-    stage0_time_ms: f64,
-    stage1_time_ms: f64,
+    // Per-worker timings
+    worker_timings: Vec<WorkerTiming>,
+    // Aggregated stats
+    stage0_total_ms: f64,
+    stage0_avg_ms: f64,
+    stage0_min_ms: f64,
+    stage0_max_ms: f64,
+    stage1_total_ms: f64,
+    stage1_avg_ms: f64,
+    stage1_min_ms: f64,
+    stage1_max_ms: f64,
+    // Other timings
     aggregation_time_ms: f64,
-    total_proving_time_ms: f64,
     verification_time_ms: f64,
-    verification_valid: bool,
+    verification_valid:  bool,
     proof_size_bytes: usize,
 }
 
 impl BenchmarkResult {
-    fn print_header() {
-        println!("\n{}", "=".repeat(130));
-        println!("{:^130}", "SHA256 Circuit Benchmark Results");
-        println!("{}", "=". repeat(130));
+    fn print_summary_header() {
+        println!("\n{}", "=".repeat(140));
+        println!("{: ^140}", "SHA256 Circuit Benchmark Summary");
+        println!("{}", "=".repeat(140));
         println!(
-            "{:>6} {:>6} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>10}",
-            "NC", "NS", "Constraints", "Setup(ms)", "Stage0(ms)", "Stage1(ms)", 
-            "Agg(ms)", "Total(ms)", "Verify(ms)", "Proof(B)"
+            "{:>4} {:>4} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+            "NC", "NS", "Constr.", "Setup", "S0-Avg", "S0-Min", "S0-Max", 
+            "S1-Avg", "S1-Min", "S1-Max", "Agg", "Verify"
         );
-        println!("{}", "-".repeat(130));
+        println!(
+            "{:>4} {:>4} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+            "", "", "", "(ms)", "(ms)", "(ms)", "(ms)", "(ms)", "(ms)", "(ms)", "(ms)", "(ms)"
+        );
+        println!("{}", "-".repeat(140));
     }
 
-    fn print(&self) {
+    fn print_summary(&self) {
         let verify_status = if self.verification_valid { "✓" } else { "✗" };
         println!(
-            "{:>6} {: >6} {:>12} {: >12.2} {:>12.2} {:>12.2} {:>12.2} {:>12.2} {:>10.2}{} {:>10}",
+            "{:>4} {:>4} {:>10} {:>10.1} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>8.2}{}",
             self.params.num_subcircuits,
             self.params.num_sha_iters_per_subcircuit,
             self.total_constraints,
             self.setup_time_ms,
-            self.stage0_time_ms,
-            self.stage1_time_ms,
+            self.stage0_avg_ms,
+            self.stage0_min_ms,
+            self.stage0_max_ms,
+            self.stage1_avg_ms,
+            self.stage1_min_ms,
+            self. stage1_max_ms,
             self.aggregation_time_ms,
-            self.total_proving_time_ms,
             self.verification_time_ms,
             verify_status,
-            self.proof_size_bytes,
         );
+    }
+
+    fn print_worker_details(&self) {
+        println!("\n{}", "=".repeat(80));
+        println!("{:^80}", "Per-Worker Timing Details");
+        println!("{}", "=".repeat(80));
+        println!(
+            "{:>10} {:>15} {:>15} {:>15}",
+            "Worker", "Stage0 (ms)", "Stage1 (ms)", "Total (ms)"
+        );
+        println! ("{}", "-".repeat(80));
+
+        for timing in &self.worker_timings {
+            let total = timing.stage0_time_ms + timing.stage1_time_ms;
+            println!(
+                "{:>10} {: >15.2} {:>15.2} {:>15.2}",
+                timing.worker_id, timing.stage0_time_ms, timing.stage1_time_ms, total
+            );
+        }
+
+        println!("{}", "-".repeat(80));
+        println!(
+            "{:>10} {: >15.2} {:>15.2} {:>15.2}",
+            "Total",
+            self.stage0_total_ms,
+            self.stage1_total_ms,
+            self.stage0_total_ms + self.stage1_total_ms
+        );
+        println!(
+            "{:>10} {: >15.2} {:>15.2} {:>15.2}",
+            "Average",
+            self.stage0_avg_ms,
+            self.stage1_avg_ms,
+            self.stage0_avg_ms + self.stage1_avg_ms
+        );
+        println!(
+            "{:>10} {:>15.2} {:>15.2}",
+            "Min", self.stage0_min_ms, self.stage1_min_ms
+        );
+        println!(
+            "{:>10} {: >15.2} {:>15.2}",
+            "Max", self.stage0_max_ms, self.stage1_max_ms
+        );
+        println!("{}", "=".repeat(80));
     }
 }
 
@@ -84,7 +151,7 @@ fn run_benchmark(params: Sha256BenchCircuitParams) -> BenchmarkResult {
     let tree_params = gen_merkle_params();
 
     println!(
-        "\n>>> Running benchmark for {} subcircuits, {} SHA256 iterations each.. .",
+        "\n>>> Running benchmark:  {} subcircuits (workers), {} SHA256 iterations each",
         params.num_subcircuits, params.num_sha_iters_per_subcircuit
     );
 
@@ -125,12 +192,11 @@ fn run_benchmark(params: Sha256BenchCircuitParams) -> BenchmarkResult {
     let setup_time = setup_start. elapsed();
     println!(
         "       Setup completed in {:.2}ms",
-        setup_time.as_secs_f64() * 1000.0
+        setup_time. as_secs_f64() * 1000.0
     );
 
-    // ============ STAGE 0:  COMMITMENT ============
-    println!("  [2/5] Stage 0: Computing commitments...");
-    let stage0_start = Instant::now();
+    // ============ STAGE 0:  COMMITMENT (Per-Worker Timing) ============
+    println!("  [2/5] Stage 0: Computing commitments (per-worker timing)...");
 
     let stage0_state = CoordinatorStage0State::new::<TreeConfig>(circ.clone());
 
@@ -139,28 +205,39 @@ fn run_benchmark(params: Sha256BenchCircuitParams) -> BenchmarkResult {
         .map(|&idx| stage0_state.gen_request(idx).to_owned())
         .collect();
 
-    let stage0_resps: Vec<Stage0Response<E>> = stage0_reqs
-        .iter()
-        .zip(proving_keys.iter())
-        .map(|(req, pk)| {
-            process_stage0_request::<_, TreeConfigVar, _, Sha256BenchCircuit, _>(
-                &mut rng,
-                tree_params.clone(),
-                pk,
-                req. clone(),
-            )
-        })
-        .collect();
+    // Measure each worker's stage0 time individually
+    let mut stage0_times: Vec<f64> = Vec::with_capacity(num_subcircuits);
+    let mut stage0_resps: Vec<Stage0Response<E>> = Vec::with_capacity(num_subcircuits);
 
-    let stage0_time = stage0_start.elapsed();
+    for (idx, (req, pk)) in stage0_reqs.iter().zip(proving_keys.iter()).enumerate() {
+        let worker_start = Instant::now();
+        
+        let resp = process_stage0_request::<_, TreeConfigVar, _, Sha256BenchCircuit, _>(
+            &mut rng,
+            tree_params.clone(),
+            pk,
+            req. clone(),
+        );
+        
+        let worker_time = worker_start.elapsed().as_secs_f64() * 1000.0;
+        stage0_times.push(worker_time);
+        stage0_resps.push(resp);
+        
+        println! ("       Worker {}: Stage0 completed in {:.2}ms", idx, worker_time);
+    }
+
+    let stage0_total:  f64 = stage0_times.iter().sum();
+    let stage0_avg = stage0_total / num_subcircuits as f64;
+    let stage0_min = stage0_times.iter().cloned().fold(f64:: INFINITY, f64::min);
+    let stage0_max = stage0_times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
     println!(
-        "       Stage 0 completed in {:.2}ms",
-        stage0_time.as_secs_f64() * 1000.0
+        "       Stage 0 total: {:.2}ms, avg: {:.2}ms, min: {:.2}ms, max: {:.2}ms",
+        stage0_total, stage0_avg, stage0_min, stage0_max
     );
 
-    // ============ STAGE 1: PROVING ============
-    println!("  [3/5] Stage 1: Generating proofs...");
-    let stage1_start = Instant::now();
+    // ============ STAGE 1: PROVING (Per-Worker Timing) ============
+    println!("  [3/5] Stage 1: Generating proofs (per-worker timing)...");
 
     let (tipp_pk, _tipp_vk) = TIPA::<E, Sha256>::setup(num_subcircuits, &mut rng).unwrap();
     let stage1_state =
@@ -171,28 +248,54 @@ fn run_benchmark(params: Sha256BenchCircuitParams) -> BenchmarkResult {
         .map(|idx| stage1_state.gen_request(*idx).to_owned())
         .collect();
 
-    let stage1_resps: Vec<_> = stage0_reqs
+    // Measure each worker's stage1 time individually
+    let mut stage1_times: Vec<f64> = Vec::with_capacity(num_subcircuits);
+    let mut stage1_resps: Vec<_> = Vec::with_capacity(num_subcircuits);
+
+    for (idx, (((stage0_req, stage0_resp), stage1_req), pk)) in stage0_reqs
+        .clone()
         .into_iter()
-        .zip(stage0_resps.into_iter())
+        .zip(stage0_resps.iter())
         .zip(stage1_reqs.into_iter())
         .zip(proving_keys.iter())
-        .map(|(((stage0_req, stage0_resp), stage1_req), pk)| {
-            process_stage1_request::<_, TreeConfigVar, _, Sha256BenchCircuit, _>(
-                &mut rng,
-                tree_params.clone(),
-                pk,
-                stage0_req,
-                &stage0_resp,
-                stage1_req,
-            )
+        .enumerate()
+    {
+        let worker_start = Instant::now();
+        
+        let resp = process_stage1_request::<_, TreeConfigVar, _, Sha256BenchCircuit, _>(
+            &mut rng,
+            tree_params.clone(),
+            pk,
+            stage0_req,
+            stage0_resp,
+            stage1_req,
+        );
+        
+        let worker_time = worker_start.elapsed().as_secs_f64() * 1000.0;
+        stage1_times.push(worker_time);
+        stage1_resps.push(resp);
+        
+        println!("       Worker {}: Stage1 completed in {:.2}ms", idx, worker_time);
+    }
+
+    let stage1_total: f64 = stage1_times.iter().sum();
+    let stage1_avg = stage1_total / num_subcircuits as f64;
+    let stage1_min = stage1_times.iter().cloned().fold(f64::INFINITY, f64::min);
+    let stage1_max = stage1_times.iter().cloned().fold(f64::NEG_INFINITY, f64:: max);
+
+    println!(
+        "       Stage 1 total:  {:.2}ms, avg: {:.2}ms, min: {:.2}ms, max: {:.2}ms",
+        stage1_total, stage1_avg, stage1_min, stage1_max
+    );
+
+    // Build worker timings
+    let worker_timings: Vec<WorkerTiming> = (0..num_subcircuits)
+        .map(|i| WorkerTiming {
+            worker_id: i,
+            stage0_time_ms: stage0_times[i],
+            stage1_time_ms: stage1_times[i],
         })
         .collect();
-
-    let stage1_time = stage1_start.elapsed();
-    println!(
-        "       Stage 1 completed in {:.2}ms",
-        stage1_time.as_secs_f64() * 1000.0
-    );
 
     // ============ AGGREGATION ============
     println!("  [4/5] Aggregating proofs...");
@@ -217,11 +320,10 @@ fn run_benchmark(params: Sha256BenchCircuitParams) -> BenchmarkResult {
     println!("  [5/5] Verifying proof...");
     let verify_start = Instant::now();
 
-    // Verify a sample individual proof
     let sample_pk = &proving_keys[0];
-    let sample_proof = &stage1_resps[0].proof;
+    let sample_proof = &stage1_resps[0]. proof;
     let public_inputs = final_agg_state.get_public_inputs();
-    let pvk = prepare_verifying_key(&sample_pk.vk());
+    let pvk = prepare_verifying_key(&sample_pk. vk());
     let is_valid = verify_proof(&pvk, sample_proof, public_inputs).unwrap();
 
     let verify_time = verify_start.elapsed();
@@ -242,18 +344,22 @@ fn run_benchmark(params: Sha256BenchCircuitParams) -> BenchmarkResult {
     let num_constraints_per_subcircuit = estimate_constraints_per_subcircuit(&params);
     let total_constraints = num_constraints_per_subcircuit * num_subcircuits;
 
-    let total_proving_time = stage0_time + stage1_time + agg_time;
-
     BenchmarkResult {
         params,
         num_constraints_per_subcircuit,
         total_constraints,
         setup_time_ms: setup_time.as_secs_f64() * 1000.0,
-        stage0_time_ms: stage0_time. as_secs_f64() * 1000.0,
-        stage1_time_ms:  stage1_time.as_secs_f64() * 1000.0,
+        worker_timings,
+        stage0_total_ms: stage0_total,
+        stage0_avg_ms: stage0_avg,
+        stage0_min_ms: stage0_min,
+        stage0_max_ms: stage0_max,
+        stage1_total_ms: stage1_total,
+        stage1_avg_ms: stage1_avg,
+        stage1_min_ms: stage1_min,
+        stage1_max_ms: stage1_max,
         aggregation_time_ms: agg_time.as_secs_f64() * 1000.0,
-        total_proving_time_ms: total_proving_time.as_secs_f64() * 1000.0,
-        verification_time_ms:  verify_time.as_secs_f64() * 1000.0,
+        verification_time_ms: verify_time.as_secs_f64() * 1000.0,
         verification_valid: is_valid,
         proof_size_bytes: proof_size,
     }
@@ -270,205 +376,176 @@ fn estimate_constraints_per_subcircuit(params: &Sha256BenchCircuitParams) -> usi
     let mut pm = SetupRomPortalManager::<Fr>::new(cs. clone());
     pm.start_subtrace(cs.clone());
 
-    // Measure subcircuit 0 and 1
     circ.generate_constraints(cs.clone(), 0, &mut pm).unwrap();
     let constraints_0 = cs.num_constraints();
 
-    circ.generate_constraints(cs.clone(), 1, &mut pm).unwrap();
+    circ.generate_constraints(cs. clone(), 1, &mut pm).unwrap();
     let constraints_total = cs.num_constraints();
 
-    // Return average
     (constraints_0 + (constraints_total - constraints_0)) / 2
 }
 
-fn print_summary(results: &[BenchmarkResult]) {
-    println!("\n{}", "=".repeat(130));
-    println!("{:^130}", "Performance Summary");
-    println!("{}", "=".repeat(130));
+fn print_final_summary(results: &[BenchmarkResult]) {
+    println!("\n{}", "=".repeat(140));
+    println!("{:^140}", "Final Performance Summary");
+    println!("{}", "=".repeat(140));
 
     if results.is_empty() {
         println!("No results to summarize.");
         return;
     }
 
-    // Calculate averages and totals
-    let total_sha_ops:  usize = results
-        .iter()
-        .map(|r| r.params.num_subcircuits * r.params.num_sha_iters_per_subcircuit)
-        .sum();
-
-    let avg_proving_time:  f64 =
-        results.iter().map(|r| r.total_proving_time_ms).sum::<f64>() / results.len() as f64;
-
-    let avg_verify_time: f64 =
-        results.iter().map(|r| r.verification_time_ms).sum::<f64>() / results.len() as f64;
-
     let all_valid = results.iter().all(|r| r.verification_valid);
 
-    println! ("Total benchmark runs:         {}", results.len());
-    println!("Total SHA256 operations:     {}", total_sha_ops);
-    println!("Average proving time:        {:.2} ms", avg_proving_time);
-    println!("Average verification time:   {:.2} ms", avg_verify_time);
     println!(
-        "All proofs valid:             {}",
+        "Total benchmark runs:           {}",
+        results.len()
+    );
+    println!(
+        "All proofs valid:              {}",
         if all_valid { "YES ✓" } else { "NO ✗" }
     );
 
-    // Find best/worst cases
-    if let Some(fastest) = results
+    // Find best single worker time
+    let best_worker = results
         .iter()
-        .min_by(|a, b| a.total_proving_time_ms.partial_cmp(&b.total_proving_time_ms).unwrap())
-    {
+        .flat_map(|r| r. worker_timings.iter())
+        .min_by(|a, b| {
+            (a.stage0_time_ms + a.stage1_time_ms)
+                .partial_cmp(&(b.stage0_time_ms + b.stage1_time_ms))
+                .unwrap()
+        });
+
+    if let Some(worker) = best_worker {
         println!(
-            "\nFastest proving:  {} - {:.2} ms",
-            fastest.params, fastest.total_proving_time_ms
+            "\nFastest single worker:          Worker {} ({:.2}ms total)",
+            worker.worker_id,
+            worker.stage0_time_ms + worker.stage1_time_ms
         );
     }
 
-    if let Some(slowest) = results
-        .iter()
-        .max_by(|a, b| a.total_proving_time_ms.partial_cmp(&b.total_proving_time_ms).unwrap())
-    {
+    // Parallel vs Sequential comparison
+    println! ("\n{}", "-".repeat(80));
+    println!("{:^80}", "Parallel Speedup Analysis");
+    println!("{}", "-".repeat(80));
+
+    for result in results {
+        let sequential_time = result.stage0_total_ms + result.stage1_total_ms;
+        let parallel_time = result.stage0_max_ms + result.stage1_max_ms + result.aggregation_time_ms;
+        let speedup = sequential_time / parallel_time;
+
         println!(
-            "Slowest proving: {} - {:.2} ms",
-            slowest.params, slowest. total_proving_time_ms
+            "Config [nc={}, ns={}]:",
+            result.params.num_subcircuits, result.params.num_sha_iters_per_subcircuit
         );
+        println!("  Sequential time (sum):     {:.2}ms", sequential_time);
+        println!(
+            "  Parallel time (max+agg):   {:.2}ms",
+            parallel_time
+        );
+        println! ("  Theoretical speedup:       {:.2}x", speedup);
+        println!();
     }
 
-    if let Some(fastest_verify) = results
-        .iter()
-        .min_by(|a, b| a.verification_time_ms.partial_cmp(&b.verification_time_ms).unwrap())
-    {
-        println!(
-            "Fastest verify:   {} - {:.2} ms",
-            fastest_verify.params, fastest_verify.verification_time_ms
-        );
-    }
-
-    println!("{}", "=".repeat(130));
+    println! ("{}", "=".repeat(140));
 }
 
 fn main() {
     println!("{}", "=".repeat(80));
     println!("{: ^80}", "Hekaton SHA256 Circuit Benchmark");
+    println!("{: ^80}", "Per-Worker Timing Analysis");
     println!("{}", "=".repeat(80));
     println!();
-    println!("This benchmark measures the performance of SHA256 circuits in the Hekaton system.");
-    println!("Metrics include: setup time, commitment, proving, aggregation, and verification.");
+    println!("This benchmark measures per-worker performance in the Hekaton system.");
+    println!("Each worker (subcircuit) is timed individually for Stage0 and Stage1.");
     println!();
 
     // Configure benchmark parameters
     let configs:  Vec<Sha256BenchCircuitParams> = vec![
-        // Small configurations for quick testing
         Sha256BenchCircuitParams {
             num_subcircuits: 2,
-            num_sha_iters_per_subcircuit:  1,
+            num_sha_iters_per_subcircuit: 1,
         },
         Sha256BenchCircuitParams {
-            num_subcircuits: 2,
+            num_subcircuits: 4,
+            num_sha_iters_per_subcircuit: 1,
+        },
+        Sha256BenchCircuitParams {
+            num_subcircuits: 4,
             num_sha_iters_per_subcircuit:  2,
         },
         Sha256BenchCircuitParams {
-            num_subcircuits: 4,
-            num_sha_iters_per_subcircuit: 1,
-        },
-        Sha256BenchCircuitParams {
-            num_subcircuits: 4,
-            num_sha_iters_per_subcircuit: 2,
-        },
-        // Medium configurations
-        Sha256BenchCircuitParams {
-            num_subcircuits: 8,
-            num_sha_iters_per_subcircuit: 1,
-        },
-        Sha256BenchCircuitParams {
             num_subcircuits: 8,
             num_sha_iters_per_subcircuit: 2,
         },
-        // Larger configurations (uncomment for full benchmark)
-        // Sha256BenchCircuitParams { num_subcircuits: 16, num_sha_iters_per_subcircuit: 1 },
-        // Sha256BenchCircuitParams { num_subcircuits:  16, num_sha_iters_per_subcircuit:  2 },
+        // Uncomment for larger tests
+        // Sha256BenchCircuitParams {
+        //     num_subcircuits: 16,
+        //     num_sha_iters_per_subcircuit: 2,
+        // },
     ];
 
     let mut results = Vec::new();
 
     for config in configs {
         match std::panic::catch_unwind(|| run_benchmark(config)) {
-            Ok(result) => results.push(result),
+            Ok(result) => {
+                // Print per-worker details for this run
+                result.print_worker_details();
+                results.push(result);
+            }
             Err(_) => {
                 eprintln!("Benchmark failed for config: {:?}", config);
             }
         }
     }
 
-    // Print results table
-    BenchmarkResult::print_header();
+    // Print summary table
+    BenchmarkResult::print_summary_header();
     for result in &results {
-        result.print();
+        result.print_summary();
     }
 
-    // Print summary
-    print_summary(&results);
+    // Print final analysis
+    print_final_summary(&results);
 
     // Print detailed breakdown for last result
     if let Some(last) = results.last() {
-        println! ("\n{}", "=".repeat(80));
+        println!("\n{}", "=". repeat(80));
         println!("{:^80}", "Detailed Breakdown (Last Run)");
         println!("{}", "=".repeat(80));
         println!(
-            "Configuration:            {} subcircuits × {} SHA256 iters",
-            last.params.num_subcircuits, last.params.num_sha_iters_per_subcircuit
+            "Configuration:             {} workers × {} SHA256 iters",
+            last.params.num_subcircuits, last.params. num_sha_iters_per_subcircuit
         );
         println!(
-            "Constraints/subcircuit:  {}",
+            "Constraints/worker:       {}",
             last.num_constraints_per_subcircuit
         );
-        println!("Total constraints:       {}", last.total_constraints);
+        println!("Total constraints:        {}", last.total_constraints);
         println!();
-        println!("Time Breakdown:");
-        println!(
-            "  Setup (key gen):       {: >10.2} ms ({:>5.1}%)",
-            last.setup_time_ms,
-            last.setup_time_ms / (last.setup_time_ms + last.total_proving_time_ms) * 100.0
-        );
-        println!(
-            "  Stage 0 (commit):      {:>10.2} ms ({: >5.1}%)",
-            last.stage0_time_ms,
-            last.stage0_time_ms / last.total_proving_time_ms * 100.0
-        );
-        println!(
-            "  Stage 1 (prove):       {:>10.2} ms ({:>5.1}%)",
-            last.stage1_time_ms,
-            last.stage1_time_ms / last. total_proving_time_ms * 100.0
-        );
-        println!(
-            "  Aggregation:           {:>10.2} ms ({:>5.1}%)",
-            last. aggregation_time_ms,
-            last.aggregation_time_ms / last.total_proving_time_ms * 100.0
-        );
-        println!("  ─────────────────────────────────────");
-        println!(
-            "  Total proving:          {:>10.2} ms",
-            last.total_proving_time_ms
-        );
-        println!(
-            "  Verification:          {:>10.2} ms",
-            last.verification_time_ms
-        );
+        println!("Stage 0 (Commitment):");
+        println!("  Total time:              {:.2}ms", last.stage0_total_ms);
+        println!("  Average per worker:     {:.2}ms", last.stage0_avg_ms);
+        println!("  Min worker time:        {:.2}ms", last.stage0_min_ms);
+        println!("  Max worker time:        {:.2}ms", last.stage0_max_ms);
         println!();
-        println!("Proof size:               {} bytes", last.proof_size_bytes);
+        println!("Stage 1 (Proving):");
+        println!("  Total time:              {:.2}ms", last.stage1_total_ms);
+        println!("  Average per worker:     {:.2}ms", last.stage1_avg_ms);
+        println!("  Min worker time:        {:.2}ms", last.stage1_min_ms);
+        println!("  Max worker time:        {:.2}ms", last.stage1_max_ms);
+        println!();
+        println!("Other:");
+        println!("  Setup time:             {:.2}ms", last.setup_time_ms);
+        println!("  Aggregation time:       {:.2}ms", last.aggregation_time_ms);
+        println!("  Verification time:      {:.2}ms", last.verification_time_ms);
+        println!("  Proof size:             {} bytes", last.proof_size_bytes);
+        println!();
         println!(
-            "Throughput:              {:.2} constraints/ms",
-            last.total_constraints as f64 / last.total_proving_time_ms
+            "Throughput:                {:.2} constraints/ms (per worker avg)",
+            last.num_constraints_per_subcircuit as f64 / (last.stage0_avg_ms + last.stage1_avg_ms)
         );
-        println!(
-            "Verification valid:      {}",
-            if last.verification_valid {
-                "YES ✓"
-            } else {
-                "NO ✗"
-            }
-        );
-        println!("{}", "=".repeat(80));
+        println! ("{}", "=".repeat(80));
     }
 }
